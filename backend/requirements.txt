@@ -1,0 +1,24 @@
+# Phase 0
+fastapi>=0.109.0
+uvicorn>=0.27.0
+python-multipart
+
+# Phase 1
+python-doctr[torch]>=0.7.0
+opencv-python-headless>=4.9.0
+Pillow>=10.2.0
+numpy
+
+# Phase 2
+mrz>=0.5.2
+
+# Phase 4
+deepface>=0.0.86
+tf-keras
+
+# Phase 6
+networkx>=3.2.1
+
+# Phase 8
+celery>=5.3.6
+redis>=5.0.0
