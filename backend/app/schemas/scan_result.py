@@ -42,7 +42,13 @@ class BiometricsResult(BaseModel):
 
 class GraphResult(BaseModel):
     fraud_loop_detected: bool = False
+    graph_status: Optional[
+        Literal["clear", "duplicate_rescan", "same_identity", "linked_profile", "fraud_loop"]
+    ] = None
     matched_alias_docs: list[str] = Field(default_factory=list)
+    matched_face_id: Optional[str] = None
+    similarity: Optional[float] = None
+    nodes_in_graph: Optional[int] = None
 
 
 class RiskBreakdown(BaseModel):

@@ -150,9 +150,12 @@ class BiometricPipeline:
 
     @staticmethod
     def verify_and_embed(id_crop_path: str, webcam_frame_path: str) -> dict:
-        return BiometricPipeline._deepface_verify(
+        start = time.perf_counter()
+        result = BiometricPipeline._deepface_verify(
             id_crop_path, webcam_frame_path, need_embedding=True
         )
+        result["inference_ms"] = round((time.perf_counter() - start) * 1000, 1)
+        return result
 
     @staticmethod
     def verify_pair(id_crop_path: str, selfie_path: str) -> dict:

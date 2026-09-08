@@ -2,7 +2,7 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 
 from app.config import UPLOAD_DIR
 from app.schemas.scan_result import ScanResult
@@ -78,19 +78,39 @@ async def scan_face(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.post("/scan/graph", response_model=ScanResult)
+async def scan_graph(
+    document: UploadFile = File(...),
+    selfie: UploadFile = File(...),
+):
+    """Phase 6: Full pipeline + identity graph fraud loop detection."""
+    scan_id, doc_path = await _save_upload(document, "doc")
+    _, selfie_path_obj = await _save_upload(selfie, "selfie")
+    orchestrator = get_orchestrator()
+    try:
+        return orchestrator.run_graph_scan(
+            str(doc_path),
+            str(selfie_path_obj),
+            scan_id=scan_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.post("/scan/full")
 async def scan_full(
     document: UploadFile = File(...),
     selfie: UploadFile | None = File(None),
+    async_mode: bool = Query(False, alias="async"),
 ):
+    """Phase 5: unified end-to-end scan → composite risk score 0–100."""
     scan_id, doc_path = await _save_upload(document, "doc")
     selfie_path = None
     if selfie and selfie.filename:
         _, selfie_path_obj = await _save_upload(selfie, "selfie")
         selfie_path = str(selfie_path_obj)
 
-    use_async = _celery_available()
-    if use_async:
+    if async_mode and _celery_available():
         from app.tasks.scan_task import run_scan_task
 
         task = run_scan_task.delay(str(doc_path), selfie_path, scan_id)
@@ -98,7 +118,7 @@ async def scan_full(
 
     orchestrator = get_orchestrator()
     try:
-        result = orchestrator.run_full_scan(str(doc_path), selfie_path, scan_id=scan_id)
+        result = orchestrator.run_unified_scan(str(doc_path), selfie_path, scan_id=scan_id)
         return result
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -164,6 +184,20 @@ def get_scan_status(job_id: str):
 def graph_alerts():
     engine = IdentityGraphEngine.get_instance()
     return {"alerts": engine.get_alerts()}
+
+
+@router.get("/graph/stats")
+def graph_stats():
+    engine = IdentityGraphEngine.get_instance()
+    return engine.get_stats()
+
+
+@router.delete("/graph/reset")
+def graph_reset():
+    """Clear in-memory graph — useful between SIH demo runs."""
+    engine = IdentityGraphEngine.get_instance()
+    engine.clear()
+    return {"status": "cleared"}
 
 
 def _celery_available() -> bool:

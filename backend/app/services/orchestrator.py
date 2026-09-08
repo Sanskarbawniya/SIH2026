@@ -15,7 +15,7 @@ from app.schemas.scan_result import (
 )
 from app.services.biometrics import BiometricPipeline, prepare_document_face_crop
 from app.services.forensics import ForensicAnalyzer
-from app.services.graph import IdentityGraphEngine
+from app.services.graph import IdentityGraphEngine, build_identity_keys, file_content_fingerprint
 from app.services.liveness import get_liveness_detector
 from app.services.ocr import DocumentOCRProcessor
 from app.services.risk_engine import RiskEngine
@@ -158,7 +158,10 @@ class ScanOrchestrator:
             liveness_passed = liveness["liveness_passed"]
 
         try:
-            bio = BiometricPipeline.verify_pair(id_crop, selfie_path)
+            if include_graph:
+                bio = BiometricPipeline.verify_and_embed(id_crop, selfie_path)
+            else:
+                bio = BiometricPipeline.verify_pair(id_crop, selfie_path)
             p_face = BiometricPipeline.compute_p_face(
                 bio["verified"],
                 bio["distance"],
@@ -175,19 +178,32 @@ class ScanOrchestrator:
             )
             result.penalties.P_face = p_face
 
-            if include_graph:
+            if include_graph and bio.get("embedding"):
                 graph_engine = IdentityGraphEngine.get_instance()
                 face_id = f"face_{scan_id[:8]}"
+                fingerprint = file_content_fingerprint(document_path, selfie_path)
+                id_keys = build_identity_keys(
+                    result.extracted.pan_number,
+                    result.extracted.aadhaar_number,
+                    result.extracted.passport_number,
+                )
                 graph_result = graph_engine.add_and_evaluate_scan(
                     face_id=face_id,
                     doc_id=scan_id,
                     embedding=bio["embedding"],
+                    content_fingerprint=fingerprint,
+                    identity_keys=id_keys,
                 )
-                p_graph = min(1.0, graph_result.get("risk_delta", 0) / 40.0)
+                p_graph = IdentityGraphEngine.normalize_p_graph(graph_result.get("risk_delta", 0))
+                stats = graph_engine.get_stats()
                 result.penalties.P_graph = p_graph
                 result.graph = GraphResult(
                     fraud_loop_detected=graph_result["fraud_loop_detected"],
+                    graph_status=graph_result.get("graph_status"),
                     matched_alias_docs=graph_result.get("matched_alias_docs", []),
+                    matched_face_id=graph_result.get("matched_face"),
+                    similarity=graph_result.get("similarity"),
+                    nodes_in_graph=stats["documents"] + stats["faces"],
                 )
         except Exception as exc:
             logger.exception("Face verification failed for scan %s", scan_id)
@@ -236,13 +252,83 @@ class ScanOrchestrator:
         )
         return result
 
-    def run_full_scan(
+    def run_unified_scan(
         self,
         document_path: str,
         selfie_path: Optional[str] = None,
         scan_id: Optional[str] = None,
         progress_callback: Optional[Callable[[int, str], None]] = None,
     ) -> ScanResult:
+        """Phase 5: OCR → validation → ELA → optional face → unified risk score (P_graph=0)."""
+        scan_id = scan_id or str(uuid.uuid4())
+
+        def report(p: int, step: str):
+            if progress_callback:
+                progress_callback(p, step)
+
+        report(10, "OCR")
+        result = self._run_document_pipeline(document_path, scan_id, progress_callback)
+        result.phase = "5"
+        result.penalties.P_graph = 0.0
+
+        if selfie_path:
+            report(70, "Face")
+            result = self._apply_face_verification(
+                result,
+                document_path,
+                selfie_path,
+                scan_id,
+                include_liveness=False,
+                include_graph=False,
+            )
+        else:
+            report(90, "Score")
+            result.risk = RiskEngine.compute(result.penalties)
+
+        report(100, "Score")
+        return result
+
+    def run_graph_scan(
+        self,
+        document_path: str,
+        selfie_path: str,
+        scan_id: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> ScanResult:
+        """Phase 6: unified pipeline + identity graph fraud loop detection."""
+        scan_id = scan_id or str(uuid.uuid4())
+
+        def report(p: int, step: str):
+            if progress_callback:
+                progress_callback(p, step)
+
+        report(10, "OCR")
+        result = self._run_document_pipeline(document_path, scan_id, progress_callback)
+        result.phase = "6"
+
+        report(60, "Face")
+        result = self._apply_face_verification(
+            result,
+            document_path,
+            selfie_path,
+            scan_id,
+            include_liveness=False,
+            include_graph=True,
+        )
+
+        report(85, "Graph")
+        result.risk = RiskEngine.compute(result.penalties)
+        report(100, "Score")
+        return result
+
+    def run_complete_scan(
+        self,
+        document_path: str,
+        selfie_path: Optional[str] = None,
+        scan_id: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> ScanResult:
+        """Phase 6–8: full pipeline with liveness + identity graph."""
         scan_id = scan_id or str(uuid.uuid4())
 
         def report(p: int, step: str):
@@ -262,12 +348,27 @@ class ScanOrchestrator:
                 include_liveness=True,
                 include_graph=True,
             )
-
-        report(95, "Score")
-        if not selfie_path:
+            report(85, "Graph")
+        else:
             result.risk = RiskEngine.compute(result.penalties)
+
         report(100, "Score")
         return result
+
+    def run_full_scan(
+        self,
+        document_path: str,
+        selfie_path: Optional[str] = None,
+        scan_id: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> ScanResult:
+        """Alias for Phase 5 unified scan (minimum viable SIH prototype)."""
+        return self.run_unified_scan(
+            document_path,
+            selfie_path,
+            scan_id=scan_id,
+            progress_callback=progress_callback,
+        )
 
 
 _orchestrator: Optional[ScanOrchestrator] = None

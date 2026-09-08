@@ -3,6 +3,7 @@ import type { ScanResult } from '../api'
 
 interface RiskGaugeProps {
   result: ScanResult | null
+  phase?: '5' | '6' | 'full'
 }
 
 const BAND_COLORS = {
@@ -11,15 +12,25 @@ const BAND_COLORS = {
   HIGH: '#ef4444',
 }
 
-export function RiskGauge({ result }: RiskGaugeProps) {
+const BREAKDOWN_ITEMS = [
+  { key: 'mrz_contribution', label: 'MRZ / Rules', max: 35, color: '#f59e0b' },
+  { key: 'ela_contribution', label: 'ELA Forensics', max: 25, color: '#a855f7' },
+  { key: 'face_contribution', label: 'Face Match', max: 25, color: '#38bdf8' },
+  { key: 'graph_contribution', label: 'Graph Fraud', max: 15, color: '#ef4444' },
+] as const
+
+export function RiskGauge({ result, phase }: RiskGaugeProps) {
   const score = result?.risk.score ?? 0
   const band = result?.risk.band ?? 'LOW'
   const color = BAND_COLORS[band]
+  const hideGraph = phase === '5'
 
   const data = [
     { name: 'score', value: score },
     { name: 'remaining', value: 100 - score },
   ]
+
+  const items = BREAKDOWN_ITEMS.filter((item) => !(hideGraph && item.key === 'graph_contribution'))
 
   return (
     <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-6">
@@ -49,18 +60,25 @@ export function RiskGauge({ result }: RiskGaugeProps) {
         </div>
       </div>
       {result && (
-        <div className="mt-4 space-y-2 text-sm">
-          {[
-            ['MRZ / Rules', result.risk.breakdown.mrz_contribution],
-            ['ELA Forensics', result.risk.breakdown.ela_contribution],
-            ['Face / Liveness', result.risk.breakdown.face_contribution],
-            ['Graph Fraud', result.risk.breakdown.graph_contribution],
-          ].map(([label, value]) => (
-            <div key={label as string} className="flex justify-between text-slate-300">
-              <span>{label}</span>
-              <span className="font-mono text-slate-400">+{(value as number).toFixed(1)}</span>
-            </div>
-          ))}
+        <div className="mt-4 space-y-3 text-sm">
+          {items.map(({ key, label, max, color: barColor }) => {
+            const value = result.risk.breakdown[key]
+            const pct = max > 0 ? (value / max) * 100 : 0
+            return (
+              <div key={key}>
+                <div className="mb-1 flex justify-between text-slate-300">
+                  <span>{label}</span>
+                  <span className="font-mono text-slate-400">+{value.toFixed(1)}</span>
+                </div>
+                <div className="h-1.5 overflow-hidden rounded-full bg-slate-700">
+                  <div
+                    className="h-full transition-all"
+                    style={{ width: `${Math.min(100, pct)}%`, backgroundColor: barColor }}
+                  />
+                </div>
+              </div>
+            )
+          })}
         </div>
       )}
     </div>

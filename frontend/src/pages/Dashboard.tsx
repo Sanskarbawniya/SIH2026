@@ -1,16 +1,38 @@
-import { useEffect, useState } from 'react'
-import { FileSearch, Loader2, ScanLine, ScanSearch, Shield, ShieldCheck, Users } from 'lucide-react'
-import { getJobStatus, scanDocument, scanFace, scanForensics, scanFull, scanOcr, submitScanJob } from '../api'
-import type { ScanResult } from '../api'
+import { useEffect, useRef, useState } from 'react'
+import { FileSearch, Gauge, GitBranch, Loader2, ScanSearch, Shield, ShieldCheck, Users } from 'lucide-react'
+import {
+  getGraphAlerts,
+  getGraphStats,
+  getJobStatus,
+  isScanResult,
+  resetGraph,
+  scanDocument,
+  scanFace,
+  scanForensics,
+  scanFull,
+  scanGraph,
+  scanOcr,
+  submitScanJob,
+} from '../api'
+import type { GraphAlert, GraphStats, ScanResult } from '../api'
 import { ElaViewer } from '../components/ElaViewer'
 import { ExtractedFieldsCard } from '../components/ExtractedFieldsCard'
 import { FaceMatchCard } from '../components/FaceMatchCard'
-import { FraudAlert } from '../components/ValidationChecklist'
+import { GraphFraudPanel } from '../components/GraphFraudPanel'
 import { RiskGauge } from '../components/RiskGauge'
+import { UnifiedScanPanel } from '../components/UnifiedScanPanel'
 import { ValidationChecklist } from '../components/ValidationChecklist'
 import { UploadPanel, WebcamCapture } from '../components/UploadPanel'
 
 const STEPS = ['OCR', 'Validate', 'ELA', 'Face', 'Graph', 'Score']
+const PROGRESS_STEPS = [
+  { progress: 12, step: 'OCR' },
+  { progress: 28, step: 'Validate' },
+  { progress: 45, step: 'ELA' },
+  { progress: 62, step: 'Face' },
+  { progress: 80, step: 'Graph' },
+  { progress: 95, step: 'Score' },
+]
 
 export function Dashboard() {
   const [documentFile, setDocumentFile] = useState<File | null>(null)
@@ -21,16 +43,21 @@ export function Dashboard() {
   const [validationResult, setValidationResult] = useState<ScanResult | null>(null)
   const [forensicsResult, setForensicsResult] = useState<ScanResult | null>(null)
   const [faceResult, setFaceResult] = useState<ScanResult | null>(null)
+  const [graphResult, setGraphResult] = useState<ScanResult | null>(null)
+  const [graphStats, setGraphStats] = useState<GraphStats | null>(null)
+  const [graphAlerts, setGraphAlerts] = useState<GraphAlert[]>([])
   const [selfiePreview, setSelfiePreview] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [ocrLoading, setOcrLoading] = useState(false)
   const [validationLoading, setValidationLoading] = useState(false)
   const [forensicsLoading, setForensicsLoading] = useState(false)
   const [faceLoading, setFaceLoading] = useState(false)
+  const [graphLoading, setGraphLoading] = useState(false)
   const [progress, setProgress] = useState(0)
   const [step, setStep] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [useAsync, setUseAsync] = useState(false)
+  const progressTimer = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
     if (!documentFile) {
@@ -51,6 +78,51 @@ export function Dashboard() {
     setSelfiePreview(url)
     return () => URL.revokeObjectURL(url)
   }, [selfieFile])
+
+  useEffect(() => {
+    return () => {
+      if (progressTimer.current) clearInterval(progressTimer.current)
+    }
+  }, [])
+
+  const clearPhaseResults = () => {
+    setOcrResult(null)
+    setValidationResult(null)
+    setForensicsResult(null)
+    setFaceResult(null)
+    setGraphResult(null)
+  }
+
+  const refreshGraphMeta = async () => {
+    try {
+      const [stats, alertsRes] = await Promise.all([getGraphStats(), getGraphAlerts()])
+      setGraphStats(stats)
+      setGraphAlerts(alertsRes.alerts)
+    } catch {
+      /* graph meta is optional */
+    }
+  }
+
+  const startProgressSimulation = (includeFace: boolean) => {
+    if (progressTimer.current) clearInterval(progressTimer.current)
+    const steps = includeFace ? PROGRESS_STEPS : PROGRESS_STEPS.filter((s) => s.step !== 'Face')
+    let index = 0
+    setProgress(steps[0].progress)
+    setStep(steps[0].step)
+    progressTimer.current = setInterval(() => {
+      index += 1
+      if (index >= steps.length) return
+      setProgress(steps[index].progress)
+      setStep(steps[index].step)
+    }, 4000)
+  }
+
+  const stopProgressSimulation = () => {
+    if (progressTimer.current) {
+      clearInterval(progressTimer.current)
+      progressTimer.current = null
+    }
+  }
 
   const pollJob = async (jobId: string) => {
     while (true) {
@@ -75,7 +147,8 @@ export function Dashboard() {
     }
     setOcrLoading(true)
     setError(null)
-    setOcrResult(null)
+    setResult(null)
+    clearPhaseResults()
     try {
       setOcrResult(await scanOcr(documentFile))
     } catch (err) {
@@ -92,7 +165,8 @@ export function Dashboard() {
     }
     setValidationLoading(true)
     setError(null)
-    setValidationResult(null)
+    setResult(null)
+    clearPhaseResults()
     try {
       setValidationResult(await scanDocument(documentFile))
     } catch (err) {
@@ -109,7 +183,8 @@ export function Dashboard() {
     }
     setForensicsLoading(true)
     setError(null)
-    setForensicsResult(null)
+    setResult(null)
+    clearPhaseResults()
     try {
       setForensicsResult(await scanForensics(documentFile))
     } catch (err) {
@@ -130,13 +205,49 @@ export function Dashboard() {
     }
     setFaceLoading(true)
     setError(null)
-    setFaceResult(null)
+    setResult(null)
+    clearPhaseResults()
     try {
       setFaceResult(await scanFace(documentFile, selfieFile))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Face match failed')
     } finally {
       setFaceLoading(false)
+    }
+  }
+
+  const handleGraphScan = async () => {
+    if (!documentFile) {
+      setError('Please upload a document first.')
+      return
+    }
+    if (!selfieFile) {
+      setError('Phase 6 requires document + selfie to build the identity graph.')
+      return
+    }
+    setGraphLoading(true)
+    setError(null)
+    setResult(null)
+    clearPhaseResults()
+    try {
+      const scanResponse = await scanGraph(documentFile, selfieFile)
+      setGraphResult(scanResponse)
+      await refreshGraphMeta()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Graph scan failed')
+    } finally {
+      setGraphLoading(false)
+    }
+  }
+
+  const handleResetGraph = async () => {
+    try {
+      await resetGraph()
+      setGraphStats(null)
+      setGraphAlerts([])
+      setError(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to reset graph')
     }
   }
 
@@ -148,28 +259,35 @@ export function Dashboard() {
     setLoading(true)
     setError(null)
     setResult(null)
-    setProgress(0)
+    clearPhaseResults()
+    setProgress(5)
     setStep('Queued')
+    startProgressSimulation(Boolean(selfieFile))
 
     try {
       if (useAsync) {
         const response = await submitScanJob(documentFile, selfieFile ?? undefined)
         if ('job_id' in response) {
           await pollJob(response.job_id)
-        } else {
+        } else if (isScanResult(response)) {
           setResult(response)
         }
       } else {
-        setResult(await scanFull(documentFile, selfieFile ?? undefined))
+        const scanResponse = await scanFull(documentFile, selfieFile ?? undefined, false)
+        setResult(scanResponse)
+        setProgress(100)
+        setStep('Score')
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Scan failed')
     } finally {
+      stopProgressSimulation()
       setLoading(false)
     }
   }
 
-  const busy = loading || ocrLoading || validationLoading || forensicsLoading || faceLoading
+  const busy = loading || ocrLoading || validationLoading || forensicsLoading || faceLoading || graphLoading
+  const showPhasePanels = !result && !graphResult && (ocrResult || validationResult || forensicsResult || faceResult)
 
   return (
     <div className="min-h-screen bg-slate-950 px-4 py-8">
@@ -178,7 +296,7 @@ export function Dashboard() {
           <Shield className="h-10 w-10 text-cyan-400" />
           <div>
             <h1 className="text-2xl font-bold text-white md:text-3xl">Identity Screening System</h1>
-            <p className="text-sm text-slate-400">SIH 2026 — Phase 4: Face Match (ArcFace Biometrics)</p>
+            <p className="text-sm text-slate-400">SIH 2026 — Phase 6: Identity Graph (Fraud Loop Detection)</p>
           </div>
         </header>
 
@@ -230,12 +348,30 @@ export function Dashboard() {
             disabled={busy || !documentFile}
             className="inline-flex items-center gap-2 rounded-lg bg-cyan-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-cyan-500 disabled:opacity-50"
           >
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <ScanLine className="h-4 w-4" />}
-            Full Scan
+            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Gauge className="h-4 w-4" />}
+            {loading ? 'Scoring…' : 'Phase 5 — Full Scan'}
+          </button>
+          <button
+            type="button"
+            onClick={handleGraphScan}
+            disabled={busy || !documentFile || !selfieFile}
+            className="inline-flex items-center gap-2 rounded-lg bg-violet-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-violet-600 disabled:opacity-50"
+            title="Scan Person A + Doc 1, then Person A + Doc 2 to trigger fraud loop"
+          >
+            {graphLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <GitBranch className="h-4 w-4" />}
+            {graphLoading ? 'Graph scan…' : 'Phase 6 — Graph Scan'}
+          </button>
+          <button
+            type="button"
+            onClick={handleResetGraph}
+            disabled={busy}
+            className="rounded-lg border border-slate-600 px-3 py-2.5 text-sm text-slate-400 hover:bg-slate-800 disabled:opacity-50"
+          >
+            Reset Graph
           </button>
           <label className="flex items-center gap-2 text-sm text-slate-400">
             <input type="checkbox" checked={useAsync} onChange={(e) => setUseAsync(e.target.checked)} className="rounded" />
-            Async (Phase 8)
+            Async queue (Phase 8)
           </label>
         </div>
 
@@ -250,11 +386,19 @@ export function Dashboard() {
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
               {STEPS.map((s) => (
-                <span key={s} className={`rounded px-2 py-0.5 text-xs ${step.includes(s) ? 'bg-cyan-500/20 text-cyan-400' : 'bg-slate-700 text-slate-500'}`}>
+                <span
+                  key={s}
+                  className={`rounded px-2 py-0.5 text-xs ${
+                    step.includes(s) ? 'bg-cyan-500/20 text-cyan-400' : 'bg-slate-700 text-slate-500'
+                  }`}
+                >
                   {s}
                 </span>
               ))}
             </div>
+            <p className="mt-3 text-xs text-slate-500">
+              Full scan runs all modules sequentially — first run may take 30–90s while ML models load.
+            </p>
           </div>
         )}
 
@@ -262,20 +406,55 @@ export function Dashboard() {
           <div className="mb-6 rounded-lg border border-red-500/50 bg-red-500/10 px-4 py-3 text-red-300">{error}</div>
         )}
 
-        {ocrResult && (
+        {result && (
+          <div className="mb-6 space-y-6">
+            <UnifiedScanPanel result={result} />
+            {result.biometrics.verified != null && (
+              <FaceMatchCard result={result} selfiePreview={selfiePreview} />
+            )}
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+              <div className="lg:col-span-2 space-y-6">
+                <ElaViewer documentPreview={documentPreview} result={result} />
+                <ExtractedFieldsCard result={result} />
+                <ValidationChecklist result={result} mode="full" />
+              </div>
+              <RiskGauge result={result} phase="5" />
+            </div>
+          </div>
+        )}
+
+        {graphResult && (
+          <div className="mb-6 space-y-6">
+            <UnifiedScanPanel result={graphResult} phase="6" />
+            <GraphFraudPanel result={graphResult} stats={graphStats} alerts={graphAlerts} />
+            {graphResult.biometrics.verified != null && (
+              <FaceMatchCard result={graphResult} selfiePreview={selfiePreview} />
+            )}
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+              <div className="lg:col-span-2 space-y-6">
+                <ElaViewer documentPreview={documentPreview} result={graphResult} />
+                <ExtractedFieldsCard result={graphResult} />
+                <ValidationChecklist result={graphResult} mode="full" />
+              </div>
+              <RiskGauge result={graphResult} phase="6" />
+            </div>
+          </div>
+        )}
+
+        {showPhasePanels && ocrResult && (
           <div className="mb-6">
             <ExtractedFieldsCard result={ocrResult} />
           </div>
         )}
 
-        {validationResult && (
+        {showPhasePanels && validationResult && (
           <div className="mb-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
             <ExtractedFieldsCard result={validationResult} />
             <ValidationChecklist result={validationResult} mode="phase2" />
           </div>
         )}
 
-        {forensicsResult && (
+        {showPhasePanels && forensicsResult && (
           <div className="mb-6 space-y-6">
             <ElaViewer documentPreview={documentPreview} result={forensicsResult} phase="3" />
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -290,7 +469,7 @@ export function Dashboard() {
           </div>
         )}
 
-        {faceResult && (
+        {showPhasePanels && faceResult && (
           <div className="mb-6 space-y-6">
             <FaceMatchCard result={faceResult} selfiePreview={selfiePreview} />
             <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -299,20 +478,6 @@ export function Dashboard() {
                 <ValidationChecklist result={faceResult} mode="full" />
               </div>
               <RiskGauge result={faceResult} />
-            </div>
-          </div>
-        )}
-
-        <FraudAlert result={result} />
-
-        {!forensicsResult && !faceResult && (
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-            <div className="lg:col-span-2 space-y-6">
-              <ElaViewer documentPreview={documentPreview} result={result} />
-            </div>
-            <div className="space-y-6">
-              <RiskGauge result={result ?? validationResult} />
-              {!validationResult && <ValidationChecklist result={result} mode="full" />}
             </div>
           </div>
         )}

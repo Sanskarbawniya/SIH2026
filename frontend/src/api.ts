@@ -42,7 +42,17 @@ export interface ScanResult {
   }
   graph: {
     fraud_loop_detected: boolean
+    graph_status?:
+      | 'clear'
+      | 'duplicate_rescan'
+      | 'same_identity'
+      | 'linked_profile'
+      | 'fraud_loop'
+      | null
     matched_alias_docs: string[]
+    matched_face_id?: string | null
+    similarity?: number | null
+    nodes_in_graph?: number | null
   }
   risk: {
     score: number
@@ -129,16 +139,61 @@ export async function scanFace(document: File, selfie: File): Promise<ScanResult
   return res.json()
 }
 
-export async function scanFull(document: File, selfie?: File): Promise<ScanResult> {
+export interface GraphAlert {
+  face_id: string
+  matched_face: string
+  docs: string[]
+  similarity: number
+}
+
+export interface GraphStats {
+  documents: number
+  faces: number
+  biometric_links: number
+  alerts: number
+}
+
+export async function scanGraph(document: File, selfie: File): Promise<ScanResult> {
+  const form = new FormData()
+  form.append('document', document)
+  form.append('selfie', selfie)
+  const res = await fetch(`${API_BASE}/api/scan/graph`, { method: 'POST', body: form })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(parseApiError(body, 'Graph scan failed'))
+  }
+  return res.json()
+}
+
+export function isScanResult(value: unknown): value is ScanResult {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'scan_id' in value &&
+    'risk' in value &&
+    !('job_id' in value)
+  )
+}
+
+export async function scanFull(
+  document: File,
+  selfie?: File,
+  asyncMode = false,
+): Promise<ScanResult> {
   const form = new FormData()
   form.append('document', document)
   if (selfie) form.append('selfie', selfie)
-  const res = await fetch(`${API_BASE}/api/scan/full`, { method: 'POST', body: form })
+  const url = asyncMode ? `${API_BASE}/api/scan/full?async=true` : `${API_BASE}/api/scan/full`
+  const res = await fetch(url, { method: 'POST', body: form })
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     throw new Error(parseApiError(body, 'Full scan failed'))
   }
-  return res.json()
+  const data = await res.json()
+  if (!isScanResult(data)) {
+    throw new Error('Unexpected async job response — enable Async mode or disable Redis auto-queue')
+  }
+  return data
 }
 
 export async function submitScanJob(
@@ -148,7 +203,7 @@ export async function submitScanJob(
   const form = new FormData()
   form.append('document', document)
   if (selfie) form.append('selfie', selfie)
-  const res = await fetch(`${API_BASE}/api/scan/full`, { method: 'POST', body: form })
+  const res = await fetch(`${API_BASE}/api/scan/full?async=true`, { method: 'POST', body: form })
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     throw new Error(parseApiError(body, 'Failed to submit scan job'))
@@ -162,8 +217,19 @@ export async function getJobStatus(jobId: string): Promise<JobStatusResponse> {
   return res.json()
 }
 
-export async function getGraphAlerts(): Promise<{ alerts: Array<{ face_id: string; docs: string[] }> }> {
+export async function getGraphAlerts(): Promise<{ alerts: GraphAlert[] }> {
   const res = await fetch(`${API_BASE}/api/graph/alerts`)
   if (!res.ok) throw new Error('Failed to fetch graph alerts')
   return res.json()
+}
+
+export async function getGraphStats(): Promise<GraphStats> {
+  const res = await fetch(`${API_BASE}/api/graph/stats`)
+  if (!res.ok) throw new Error('Failed to fetch graph stats')
+  return res.json()
+}
+
+export async function resetGraph(): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/graph/reset`, { method: 'DELETE' })
+  if (!res.ok) throw new Error('Failed to reset graph')
 }

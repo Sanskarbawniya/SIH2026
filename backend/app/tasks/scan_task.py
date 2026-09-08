@@ -23,7 +23,7 @@ def run_scan_task(self, document_path: str, selfie_path: str | None, scan_id: st
         self.update_state(state="PROGRESS", meta={"progress": progress, "step": step})
 
     orchestrator = get_orchestrator()
-    result = orchestrator.run_full_scan(
+    result = orchestrator.run_complete_scan(
         document_path,
         selfie_path,
         scan_id=scan_id,
