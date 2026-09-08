@@ -153,9 +153,29 @@ class ScanOrchestrator:
         id_face_url = BiometricPipeline.save_face_crop_url(face_crop, scan_id)
 
         liveness_passed = None
+        liveness_result: dict = {}
         if include_liveness:
-            liveness = get_liveness_detector().check_liveness(selfie_path)
-            liveness_passed = liveness["liveness_passed"]
+            liveness_result = get_liveness_detector().check_liveness(selfie_path)
+            liveness_passed = liveness_result["liveness_passed"]
+
+        def _liveness_fields() -> dict:
+            return {
+                "liveness_passed": liveness_passed,
+                "liveness_score": liveness_result.get("score"),
+                "liveness_method": liveness_result.get("method"),
+                "spoof_reason": None if liveness_passed else liveness_result.get("reason"),
+                "liveness_inference_ms": liveness_result.get("inference_ms"),
+            }
+
+        if include_liveness and liveness_passed is False:
+            result.biometrics = BiometricsResult(
+                verified=False,
+                id_face_url=id_face_url,
+                **_liveness_fields(),
+            )
+            result.penalties.P_face = 1.0
+            result.risk = RiskEngine.compute(result.penalties)
+            return result
 
         try:
             if include_graph:
@@ -172,9 +192,9 @@ class ScanOrchestrator:
                 verified=bio["verified"],
                 distance=bio["distance"],
                 threshold=bio.get("threshold"),
-                liveness_passed=liveness_passed,
                 id_face_url=id_face_url,
                 face_inference_ms=bio.get("inference_ms"),
+                **_liveness_fields(),
             )
             result.penalties.P_face = p_face
 
@@ -209,8 +229,8 @@ class ScanOrchestrator:
             logger.exception("Face verification failed for scan %s", scan_id)
             result.biometrics = BiometricsResult(
                 verified=False,
-                liveness_passed=liveness_passed,
                 id_face_url=id_face_url,
+                **_liveness_fields(),
             )
             result.penalties.P_face = 1.0
             # Return structured result instead of 500 for common face-detection failures
@@ -318,6 +338,39 @@ class ScanOrchestrator:
 
         report(85, "Graph")
         result.risk = RiskEngine.compute(result.penalties)
+        report(100, "Score")
+        return result
+
+    def run_liveness_scan(
+        self,
+        document_path: str,
+        selfie_path: str,
+        scan_id: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, str], None]] = None,
+    ) -> ScanResult:
+        """Phase 7: liveness → face match → identity graph (if live)."""
+        scan_id = scan_id or str(uuid.uuid4())
+
+        def report(p: int, step: str):
+            if progress_callback:
+                progress_callback(p, step)
+
+        report(10, "OCR")
+        result = self._run_document_pipeline(document_path, scan_id, progress_callback)
+        result.phase = "7"
+
+        report(55, "Liveness")
+        report(70, "Face")
+        result = self._apply_face_verification(
+            result,
+            document_path,
+            selfie_path,
+            scan_id,
+            include_liveness=True,
+            include_graph=True,
+        )
+
+        report(85, "Graph")
         report(100, "Score")
         return result
 

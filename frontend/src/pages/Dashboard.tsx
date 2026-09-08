@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { FileSearch, Gauge, GitBranch, Loader2, ScanSearch, Shield, ShieldCheck, Users } from 'lucide-react'
+import { FileSearch, Gauge, GitBranch, Loader2, ScanSearch, Shield, ShieldCheck, Sparkles, Users } from 'lucide-react'
 import {
   getGraphAlerts,
   getGraphStats,
@@ -11,6 +11,7 @@ import {
   scanForensics,
   scanFull,
   scanGraph,
+  scanLiveness,
   scanOcr,
   submitScanJob,
 } from '../api'
@@ -19,6 +20,7 @@ import { ElaViewer } from '../components/ElaViewer'
 import { ExtractedFieldsCard } from '../components/ExtractedFieldsCard'
 import { FaceMatchCard } from '../components/FaceMatchCard'
 import { GraphFraudPanel } from '../components/GraphFraudPanel'
+import { LivenessCard } from '../components/LivenessCard'
 import { RiskGauge } from '../components/RiskGauge'
 import { UnifiedScanPanel } from '../components/UnifiedScanPanel'
 import { ValidationChecklist } from '../components/ValidationChecklist'
@@ -44,6 +46,7 @@ export function Dashboard() {
   const [forensicsResult, setForensicsResult] = useState<ScanResult | null>(null)
   const [faceResult, setFaceResult] = useState<ScanResult | null>(null)
   const [graphResult, setGraphResult] = useState<ScanResult | null>(null)
+  const [livenessResult, setLivenessResult] = useState<ScanResult | null>(null)
   const [graphStats, setGraphStats] = useState<GraphStats | null>(null)
   const [graphAlerts, setGraphAlerts] = useState<GraphAlert[]>([])
   const [selfiePreview, setSelfiePreview] = useState<string | null>(null)
@@ -53,6 +56,7 @@ export function Dashboard() {
   const [forensicsLoading, setForensicsLoading] = useState(false)
   const [faceLoading, setFaceLoading] = useState(false)
   const [graphLoading, setGraphLoading] = useState(false)
+  const [livenessLoading, setLivenessLoading] = useState(false)
   const [progress, setProgress] = useState(0)
   const [step, setStep] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -91,6 +95,7 @@ export function Dashboard() {
     setForensicsResult(null)
     setFaceResult(null)
     setGraphResult(null)
+    setLivenessResult(null)
   }
 
   const refreshGraphMeta = async () => {
@@ -240,6 +245,29 @@ export function Dashboard() {
     }
   }
 
+  const handleLivenessScan = async () => {
+    if (!documentFile) {
+      setError('Please upload a document first.')
+      return
+    }
+    if (!selfieFile) {
+      setError('Phase 7 requires a selfie — use live webcam, not a photo of a photo.')
+      return
+    }
+    setLivenessLoading(true)
+    setError(null)
+    setResult(null)
+    clearPhaseResults()
+    try {
+      setLivenessResult(await scanLiveness(documentFile, selfieFile))
+      await refreshGraphMeta()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Liveness scan failed')
+    } finally {
+      setLivenessLoading(false)
+    }
+  }
+
   const handleResetGraph = async () => {
     try {
       await resetGraph()
@@ -286,8 +314,13 @@ export function Dashboard() {
     }
   }
 
-  const busy = loading || ocrLoading || validationLoading || forensicsLoading || faceLoading || graphLoading
-  const showPhasePanels = !result && !graphResult && (ocrResult || validationResult || forensicsResult || faceResult)
+  const busy =
+    loading || ocrLoading || validationLoading || forensicsLoading || faceLoading || graphLoading || livenessLoading
+  const showPhasePanels =
+    !result &&
+    !graphResult &&
+    !livenessResult &&
+    (ocrResult || validationResult || forensicsResult || faceResult)
 
   return (
     <div className="min-h-screen bg-slate-950 px-4 py-8">
@@ -296,7 +329,9 @@ export function Dashboard() {
           <Shield className="h-10 w-10 text-cyan-400" />
           <div>
             <h1 className="text-2xl font-bold text-white md:text-3xl">Identity Screening System</h1>
-            <p className="text-sm text-slate-400">SIH 2026 — Phase 6: Identity Graph (Fraud Loop Detection)</p>
+            <p className="text-sm text-slate-400">
+              SIH 2026 — Phase 7: Liveness + Identity Graph (Phases 6–7)
+            </p>
           </div>
         </header>
 
@@ -363,6 +398,16 @@ export function Dashboard() {
           </button>
           <button
             type="button"
+            onClick={handleLivenessScan}
+            disabled={busy || !documentFile || !selfieFile}
+            className="inline-flex items-center gap-2 rounded-lg bg-teal-700 px-4 py-2.5 text-sm font-medium text-white hover:bg-teal-600 disabled:opacity-50"
+            title="Live face → pass. Photo on phone screen → fail"
+          >
+            {livenessLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+            {livenessLoading ? 'Checking…' : 'Phase 7 — Liveness'}
+          </button>
+          <button
+            type="button"
             onClick={handleResetGraph}
             disabled={busy}
             className="rounded-lg border border-slate-600 px-3 py-2.5 text-sm text-slate-400 hover:bg-slate-800 disabled:opacity-50"
@@ -419,6 +464,26 @@ export function Dashboard() {
                 <ValidationChecklist result={result} mode="full" />
               </div>
               <RiskGauge result={result} phase="5" />
+            </div>
+          </div>
+        )}
+
+        {livenessResult && (
+          <div className="mb-6 space-y-6">
+            <LivenessCard result={livenessResult} selfiePreview={selfiePreview} />
+            {livenessResult.biometrics.liveness_passed && (
+              <GraphFraudPanel result={livenessResult} stats={graphStats} alerts={graphAlerts} />
+            )}
+            {livenessResult.biometrics.liveness_passed && livenessResult.biometrics.verified != null && (
+              <FaceMatchCard result={livenessResult} selfiePreview={selfiePreview} />
+            )}
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+              <div className="lg:col-span-2 space-y-6">
+                <ElaViewer documentPreview={documentPreview} result={livenessResult} />
+                <ExtractedFieldsCard result={livenessResult} />
+                <ValidationChecklist result={livenessResult} mode="full" />
+              </div>
+              <RiskGauge result={livenessResult} phase="6" />
             </div>
           </div>
         )}

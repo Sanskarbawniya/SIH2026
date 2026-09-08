@@ -78,6 +78,25 @@ async def scan_face(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@router.post("/scan/liveness", response_model=ScanResult)
+async def scan_liveness(
+    document: UploadFile = File(...),
+    selfie: UploadFile = File(...),
+):
+    """Phase 7: Anti-spoof liveness on selfie, then face match if live."""
+    scan_id, doc_path = await _save_upload(document, "doc")
+    _, selfie_path_obj = await _save_upload(selfie, "selfie")
+    orchestrator = get_orchestrator()
+    try:
+        return orchestrator.run_liveness_scan(
+            str(doc_path),
+            str(selfie_path_obj),
+            scan_id=scan_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @router.post("/scan/graph", response_model=ScanResult)
 async def scan_graph(
     document: UploadFile = File(...),

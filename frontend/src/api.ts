@@ -37,8 +37,12 @@ export interface ScanResult {
     distance: number | null
     threshold?: number | null
     liveness_passed: boolean | null
+    liveness_score?: number | null
+    liveness_method?: string | null
+    spoof_reason?: string | null
     id_face_url?: string | null
     face_inference_ms?: number | null
+    liveness_inference_ms?: number | null
   }
   graph: {
     fraud_loop_detected: boolean
@@ -161,6 +165,18 @@ export async function scanGraph(document: File, selfie: File): Promise<ScanResul
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     throw new Error(parseApiError(body, 'Graph scan failed'))
+  }
+  return res.json()
+}
+
+export async function scanLiveness(document: File, selfie: File): Promise<ScanResult> {
+  const form = new FormData()
+  form.append('document', document)
+  form.append('selfie', selfie)
+  const res = await fetch(`${API_BASE}/api/scan/liveness`, { method: 'POST', body: form })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}))
+    throw new Error(parseApiError(body, 'Liveness scan failed'))
   }
   return res.json()
 }

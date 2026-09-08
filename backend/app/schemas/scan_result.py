@@ -36,8 +36,12 @@ class BiometricsResult(BaseModel):
     distance: Optional[float] = None
     threshold: Optional[float] = None
     liveness_passed: Optional[bool] = None
+    liveness_score: Optional[float] = None
+    liveness_method: Optional[str] = None
+    spoof_reason: Optional[str] = None
     id_face_url: Optional[str] = None
     face_inference_ms: Optional[float] = None
+    liveness_inference_ms: Optional[float] = None
 
 
 class GraphResult(BaseModel):

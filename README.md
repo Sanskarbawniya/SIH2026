@@ -2,6 +2,9 @@
 
 AI-Based Fake Identity & Document Screening System for border checkpoints and eKYC portals.
 
+> **Start here:** [`SIH_PROJECT.md`](./SIH_PROJECT.md) — master architecture, system design, tech stack, and phase-by-phase build plan.  
+> Problem statement reference: [`SIH_PS26188.md`](./SIH_PS26188.md)
+
 ## Quick Start
 
 ### Prerequisites
@@ -53,7 +56,7 @@ Enable **Async queue** checkbox in the dashboard UI.
 
 ## Build Phases
 
-See [SIH_PS26188.md](./SIH_PS26188.md) for the full architecture spec and phase-by-phase guide.
+See [SIH_PROJECT.md](./SIH_PROJECT.md) for the master architecture document and phase-by-phase guide.
 
 | Phase | Status |
 |-------|--------|
