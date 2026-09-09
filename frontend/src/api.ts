@@ -70,15 +70,6 @@ export interface ScanResult {
   }
 }
 
-export interface JobStatusResponse {
-  job_id: string
-  status: 'pending' | 'processing' | 'completed' | 'failed'
-  progress: number
-  step: string
-  result: ScanResult | null
-  error: string | null
-}
-
 const API_BASE = ''
 
 function parseApiError(body: unknown, fallback: string): string {
@@ -181,55 +172,15 @@ export async function scanLiveness(document: File, selfie: File): Promise<ScanRe
   return res.json()
 }
 
-export function isScanResult(value: unknown): value is ScanResult {
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    'scan_id' in value &&
-    'risk' in value &&
-    !('job_id' in value)
-  )
-}
-
-export async function scanFull(
-  document: File,
-  selfie?: File,
-  asyncMode = false,
-): Promise<ScanResult> {
+export async function scanFull(document: File, selfie?: File): Promise<ScanResult> {
   const form = new FormData()
   form.append('document', document)
   if (selfie) form.append('selfie', selfie)
-  const url = asyncMode ? `${API_BASE}/api/scan/full?async=true` : `${API_BASE}/api/scan/full`
-  const res = await fetch(url, { method: 'POST', body: form })
+  const res = await fetch(`${API_BASE}/api/scan/full`, { method: 'POST', body: form })
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
     throw new Error(parseApiError(body, 'Full scan failed'))
   }
-  const data = await res.json()
-  if (!isScanResult(data)) {
-    throw new Error('Unexpected async job response — enable Async mode or disable Redis auto-queue')
-  }
-  return data
-}
-
-export async function submitScanJob(
-  document: File,
-  selfie?: File,
-): Promise<{ job_id: string } | ScanResult> {
-  const form = new FormData()
-  form.append('document', document)
-  if (selfie) form.append('selfie', selfie)
-  const res = await fetch(`${API_BASE}/api/scan/full?async=true`, { method: 'POST', body: form })
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}))
-    throw new Error(parseApiError(body, 'Failed to submit scan job'))
-  }
-  return res.json()
-}
-
-export async function getJobStatus(jobId: string): Promise<JobStatusResponse> {
-  const res = await fetch(`${API_BASE}/api/scan/${jobId}/status`)
-  if (!res.ok) throw new Error('Failed to fetch job status')
   return res.json()
 }
 

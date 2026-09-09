@@ -88,7 +88,8 @@ export function LivenessCard({ result, selfiePreview }: LivenessCardProps) {
 
       {!passed && (
         <p className="text-xs text-slate-400">
-          Demo tip: hold a printed photo or phone screen to the camera → fail. Use live webcam face → pass.
+          Demo tip: hold a printed photo or phone screen to the camera → fail. Use live webcam with good lighting → pass.
+          Face match still runs below for inspection even when liveness fails.
         </p>
       )}
     </div>

@@ -87,6 +87,12 @@ class DocumentOCRProcessor:
         if img is None:
             raise ValueError(f"Could not read image: {image_path}")
 
+        max_dim = 1280
+        h, w = img.shape[:2]
+        if max(h, w) > max_dim:
+            scale = max_dim / max(h, w)
+            img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
@@ -168,8 +174,16 @@ class DocumentOCRProcessor:
         return fields
 
     def extract_fields_timed(self, image_path: str) -> tuple[dict, float]:
+        from app.services.scan_cache import ScanCache
+
+        cached = ScanCache.get_ocr_fields(image_path)
+        if cached is not None:
+            logger.info("OCR cache hit for %s", image_path)
+            return cached, 0.0
+
         start = time.perf_counter()
         fields = self.extract_fields(image_path)
         elapsed_ms = (time.perf_counter() - start) * 1000
+        ScanCache.set_ocr_fields(image_path, fields)
         logger.info("OCR inference completed in %.0fms for %s", elapsed_ms, image_path)
         return fields, elapsed_ms

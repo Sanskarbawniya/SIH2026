@@ -1,12 +1,12 @@
 import uuid
 from pathlib import Path
-from typing import Callable, Optional
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.config import UPLOAD_DIR
 from app.schemas.scan_result import ScanResult
 from app.services.graph import IdentityGraphEngine
+from app.services.scan_cache import ScanCache
 from app.services.orchestrator import get_orchestrator
 
 router = APIRouter(tags=["scan"])
@@ -116,11 +116,10 @@ async def scan_graph(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@router.post("/scan/full")
+@router.post("/scan/full", response_model=ScanResult)
 async def scan_full(
     document: UploadFile = File(...),
     selfie: UploadFile | None = File(None),
-    async_mode: bool = Query(False, alias="async"),
 ):
     """Phase 5: unified end-to-end scan → composite risk score 0–100."""
     scan_id, doc_path = await _save_upload(document, "doc")
@@ -129,74 +128,11 @@ async def scan_full(
         _, selfie_path_obj = await _save_upload(selfie, "selfie")
         selfie_path = str(selfie_path_obj)
 
-    if async_mode and _celery_available():
-        from app.tasks.scan_task import run_scan_task
-
-        task = run_scan_task.delay(str(doc_path), selfie_path, scan_id)
-        return {"job_id": task.id, "scan_id": scan_id}
-
     orchestrator = get_orchestrator()
     try:
-        result = orchestrator.run_unified_scan(str(doc_path), selfie_path, scan_id=scan_id)
-        return result
+        return orchestrator.run_unified_scan(str(doc_path), selfie_path, scan_id=scan_id)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@router.get("/scan/{job_id}/status")
-def get_scan_status(job_id: str):
-    if not _celery_available():
-        return {
-            "job_id": job_id,
-            "status": "failed",
-            "progress": 0,
-            "step": "Celery unavailable",
-            "result": None,
-            "error": "Async queue not configured. Start Redis and Celery worker, or disable async mode.",
-        }
-
-    from celery.result import AsyncResult
-
-    from app.tasks.scan_task import celery_app
-
-    task = AsyncResult(job_id, app=celery_app)
-    meta = task.info or {}
-
-    if task.state == "PENDING":
-        return {
-            "job_id": job_id,
-            "status": "pending",
-            "progress": 0,
-            "step": "Queued",
-            "result": None,
-            "error": None,
-        }
-    if task.state == "PROGRESS":
-        return {
-            "job_id": job_id,
-            "status": "processing",
-            "progress": meta.get("progress", 0),
-            "step": meta.get("step", "Processing"),
-            "result": None,
-            "error": None,
-        }
-    if task.state == "SUCCESS":
-        return {
-            "job_id": job_id,
-            "status": "completed",
-            "progress": 100,
-            "step": "Score",
-            "result": task.result,
-            "error": None,
-        }
-    return {
-        "job_id": job_id,
-        "status": "failed",
-        "progress": meta.get("progress", 0) if isinstance(meta, dict) else 0,
-        "step": "Failed",
-        "result": None,
-        "error": str(task.info) if task.info else "Task failed",
-    }
 
 
 @router.get("/graph/alerts")
@@ -216,18 +152,5 @@ def graph_reset():
     """Clear in-memory graph — useful between SIH demo runs."""
     engine = IdentityGraphEngine.get_instance()
     engine.clear()
+    ScanCache.clear()
     return {"status": "cleared"}
-
-
-def _celery_available() -> bool:
-    try:
-        import os
-
-        import redis
-
-        url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        client = redis.from_url(url, socket_connect_timeout=1)
-        client.ping()
-        return True
-    except Exception:
-        return False

@@ -12,6 +12,11 @@ class ForensicAnalyzer:
     @staticmethod
     def generate_ela(image_path: str, quality: int = 90) -> tuple[np.ndarray, float]:
         original = Image.open(image_path).convert("RGB")
+        max_dim = 1024
+        w, h = original.size
+        if max(w, h) > max_dim:
+            scale = max_dim / max(w, h)
+            original = original.resize((int(w * scale), int(h * scale)), Image.Resampling.LANCZOS)
 
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             resaved_path = tmp.name

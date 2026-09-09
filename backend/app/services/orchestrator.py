@@ -19,6 +19,7 @@ from app.services.graph import IdentityGraphEngine, build_identity_keys, file_co
 from app.services.liveness import get_liveness_detector
 from app.services.ocr import DocumentOCRProcessor
 from app.services.risk_engine import RiskEngine
+from app.services.scan_cache import DocumentPipelineEntry, ScanCache
 from app.services.validation import ValidationEngine
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,27 @@ class ScanOrchestrator:
                 progress_callback(p, step)
 
         report(10, "OCR")
+        cached = ScanCache.get_document_pipeline(str(doc_path))
+        if cached:
+            logger.info("Document pipeline cache hit — skipping OCR + ELA")
+            extracted = ExtractedFields(**cached.extracted)
+            validations = ValidationResults(**cached.validations)
+            ela_filename = f"{scan_id}_ela.png"
+            ela_url = ForensicAnalyzer.save_ela_image(
+                cached.ela_np, UPLOAD_DIR / "ela" / ela_filename
+            )
+            report(30, "Validate")
+            report(50, "ELA")
+            return ScanResult(
+                scan_id=scan_id,
+                status="completed",
+                extracted=extracted,
+                validations=validations,
+                penalties=Penalties(P_mrz=cached.p_mrz, P_ela=cached.p_ela),
+                forensics=ForensicsResult(ela_url=ela_url, anomaly_score=cached.anomaly_score),
+                risk=RiskEngine.compute(Penalties(P_mrz=cached.p_mrz, P_ela=cached.p_ela)),
+            )
+
         extracted_dict, _ = self._get_ocr().extract_fields_timed(str(doc_path))
         extracted = ExtractedFields(**extracted_dict)
 
@@ -62,6 +84,19 @@ class ScanOrchestrator:
         ela_filename = f"{scan_id}_ela.png"
         ela_url = ForensicAnalyzer.save_ela_image(ela_np, UPLOAD_DIR / "ela" / ela_filename)
         p_ela = ForensicAnalyzer.normalize_p_ela(anomaly_score)
+
+        ScanCache.set_document_pipeline(
+            str(doc_path),
+            DocumentPipelineEntry(
+                extracted=extracted_dict,
+                validations=validations_dict,
+                p_mrz=p_mrz,
+                p_ela=p_ela,
+                anomaly_score=anomaly_score,
+                ela_np=ela_np,
+            ),
+        )
+        ScanCache.set_ocr_fields(str(doc_path), extracted_dict)
 
         return ScanResult(
             scan_id=scan_id,

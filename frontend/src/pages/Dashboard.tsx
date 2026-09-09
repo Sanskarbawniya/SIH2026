@@ -3,8 +3,6 @@ import { FileSearch, Gauge, GitBranch, Loader2, ScanSearch, Shield, ShieldCheck,
 import {
   getGraphAlerts,
   getGraphStats,
-  getJobStatus,
-  isScanResult,
   resetGraph,
   scanDocument,
   scanFace,
@@ -13,7 +11,6 @@ import {
   scanGraph,
   scanLiveness,
   scanOcr,
-  submitScanJob,
 } from '../api'
 import type { GraphAlert, GraphStats, ScanResult } from '../api'
 import { ElaViewer } from '../components/ElaViewer'
@@ -60,7 +57,6 @@ export function Dashboard() {
   const [progress, setProgress] = useState(0)
   const [step, setStep] = useState('')
   const [error, setError] = useState<string | null>(null)
-  const [useAsync, setUseAsync] = useState(false)
   const progressTimer = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
@@ -126,22 +122,6 @@ export function Dashboard() {
     if (progressTimer.current) {
       clearInterval(progressTimer.current)
       progressTimer.current = null
-    }
-  }
-
-  const pollJob = async (jobId: string) => {
-    while (true) {
-      const status = await getJobStatus(jobId)
-      setProgress(status.progress)
-      setStep(status.step)
-      if (status.status === 'completed' && status.result) {
-        setResult(status.result)
-        return
-      }
-      if (status.status === 'failed') {
-        throw new Error(status.error || 'Scan failed')
-      }
-      await new Promise((r) => setTimeout(r, 800))
     }
   }
 
@@ -293,19 +273,10 @@ export function Dashboard() {
     startProgressSimulation(Boolean(selfieFile))
 
     try {
-      if (useAsync) {
-        const response = await submitScanJob(documentFile, selfieFile ?? undefined)
-        if ('job_id' in response) {
-          await pollJob(response.job_id)
-        } else if (isScanResult(response)) {
-          setResult(response)
-        }
-      } else {
-        const scanResponse = await scanFull(documentFile, selfieFile ?? undefined, false)
-        setResult(scanResponse)
-        setProgress(100)
-        setStep('Score')
-      }
+      const scanResponse = await scanFull(documentFile, selfieFile ?? undefined)
+      setResult(scanResponse)
+      setProgress(100)
+      setStep('Score')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Scan failed')
     } finally {
@@ -414,10 +385,6 @@ export function Dashboard() {
           >
             Reset Graph
           </button>
-          <label className="flex items-center gap-2 text-sm text-slate-400">
-            <input type="checkbox" checked={useAsync} onChange={(e) => setUseAsync(e.target.checked)} className="rounded" />
-            Async queue (Phase 8)
-          </label>
         </div>
 
         {loading && (
@@ -442,7 +409,7 @@ export function Dashboard() {
               ))}
             </div>
             <p className="mt-3 text-xs text-slate-500">
-              Full scan runs all modules sequentially — first run may take 30–90s while ML models load.
+              First scan after server start loads ML models (15–45s). Re-scanning the same document is much faster (cached OCR + ELA).
             </p>
           </div>
         )}

@@ -54,7 +54,9 @@ export function WebcamCapture({ onCapture, selfieFile, disabled }: WebcamCapture
 
   const startCamera = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+      })
       streamRef.current = stream
       if (videoRef.current) {
         videoRef.current.srcObject = stream
@@ -87,7 +89,7 @@ export function WebcamCapture({ onCapture, selfieFile, disabled }: WebcamCapture
       onCapture(file)
       setPreview(canvas.toDataURL('image/jpeg'))
       stopCamera()
-    }, 'image/jpeg', 0.92)
+    }, 'image/jpeg', 0.95)
   }
 
   return (

@@ -11,7 +11,6 @@ AI-Based Fake Identity & Document Screening System for border checkpoints and eK
 
 - Python 3.11+
 - Node.js 18+
-- (Optional Phase 8) Docker Desktop + Redis
 
 ### Backend
 
@@ -33,26 +32,22 @@ npm run dev
 
 Open http://localhost:5173
 
-### Phase 8 — Async Queue (optional)
-
-```bash
-docker compose up redis -d
-cd backend
-celery -A app.tasks.scan_task.celery_app worker --loglevel=info
-```
-
-Enable **Async queue** checkbox in the dashboard UI.
-
 ## API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/health` | GET | Health check |
 | `/api/upload` | POST | Raw file upload |
-| `/api/scan/document` | POST | OCR + validation + ELA |
-| `/api/scan/full` | POST | Full pipeline (sync or async job) |
-| `/api/scan/{job_id}/status` | GET | Async job polling |
+| `/api/scan/ocr` | POST | OCR only (Phase 1) |
+| `/api/scan/document` | POST | OCR + validation (Phase 2) |
+| `/api/scan/forensics` | POST | OCR + validation + ELA (Phase 3) |
+| `/api/scan/face` | POST | Face match (Phase 4) |
+| `/api/scan/full` | POST | Full sync pipeline (Phase 5) |
+| `/api/scan/graph` | POST | Full pipeline + identity graph (Phase 6) |
+| `/api/scan/liveness` | POST | Liveness + face + graph (Phase 7) |
 | `/api/graph/alerts` | GET | Fraud loop alerts |
+| `/api/graph/stats` | GET | In-memory graph stats |
+| `/api/graph/reset` | DELETE | Clear graph |
 
 ## Build Phases
 
@@ -68,7 +63,6 @@ See [SIH_PROJECT.md](./SIH_PROJECT.md) for the master architecture document and 
 | 5 — Unified risk engine | Done |
 | 6 — Identity graph | Done |
 | 7 — Liveness (heuristic + MiniFASNet slot) | Done |
-| 8 — Celery async queue | Done |
 
 ## Liveness Weights (Phase 7)
 

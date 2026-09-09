@@ -8,7 +8,8 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-LIVENESS_PASS_THRESHOLD = 0.52
+# Tuned for live webcam selfies (JPEG). Printed/screen attacks need multiple strong cues.
+LIVENESS_PASS_THRESHOLD = 0.36
 
 
 class LivenessDetector:
@@ -36,8 +37,17 @@ class LivenessDetector:
             return None
 
     @staticmethod
+    def _crop_face_region(img: np.ndarray) -> np.ndarray:
+        """Center crop — webcam selfies keep the face in the middle."""
+        h, w = img.shape[:2]
+        y1, y2 = int(h * 0.10), int(h * 0.90)
+        x1, x2 = int(w * 0.15), int(w * 0.85)
+        crop = img[y1:y2, x1:x2]
+        return crop if crop.size else img
+
+    @staticmethod
     def _analyze_signals(image_path: str) -> dict:
-        """Heuristic anti-spoof signals for screen/print attacks."""
+        """Heuristic anti-spoof tuned for live webcam capture (not print/screen replay)."""
         img = cv2.imread(image_path)
         if img is None:
             return {
@@ -46,52 +56,77 @@ class LivenessDetector:
                 "texture_score": 0.0,
                 "screen_glare": 0.0,
                 "score": 0.0,
+                "strong_spoof_count": 4,
+                "passed": False,
                 "reason": "Could not read selfie image",
             }
 
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        roi = LivenessDetector._crop_face_region(img)
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
 
         laplacian_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-        sharpness = min(1.0, laplacian_var / 120.0)
+        # Webcam JPEG compresses sharpness — use a lower divisor than studio photos
+        sharpness = min(1.0, laplacian_var / 45.0)
 
-        color_std = float(np.std(img.astype(np.float32)))
-        color_variance = min(1.0, color_std / 45.0)
+        color_std = float(np.std(roi.astype(np.float32)))
+        color_variance = min(1.0, color_std / 32.0)
 
-        f = np.fft.fftshift(np.fft.fft2(gray))
+        gray_fft = gray
+        if max(h, w) > 512:
+            scale = 512 / max(h, w)
+            gray_fft = cv2.resize(gray, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+
+        fh, fw = gray_fft.shape
+        f = np.fft.fftshift(np.fft.fft2(gray_fft))
         magnitude = np.abs(f)
-        cy, cx = h // 2, w // 2
-        y, x = np.ogrid[:h, :w]
-        mask = ((y - cy) ** 2 + (x - cx) ** 2) <= (min(h, w) * 0.15) ** 2
+        cy, cx = fh // 2, fw // 2
+        y, x = np.ogrid[:fh, :fw]
+        mask = ((y - cy) ** 2 + (x - cx) ** 2) <= (min(fh, fw) * 0.15) ** 2
         low_energy = float(magnitude[mask].mean() or 1.0)
         high_energy = float(magnitude[~mask].mean() or 0.0)
         hf_ratio = high_energy / (low_energy + 1e-6)
-        texture_score = min(1.0, hf_ratio / 0.35)
+        texture_score = min(1.0, hf_ratio / 0.25)
 
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         saturation = hsv[:, :, 1].astype(np.float32) / 255.0
         value = hsv[:, :, 2].astype(np.float32) / 255.0
-        bright_flat = np.mean((saturation < 0.12) & (value > 0.75))
-        screen_glare = min(1.0, bright_flat * 4.0)
+        # Only flag extreme flat bright regions (phone screen), not normal webcam lighting
+        bright_flat = float(np.mean((saturation < 0.07) & (value > 0.85)))
+        screen_glare = min(1.0, bright_flat * 2.5)
 
         score = (
-            sharpness * 0.35
-            + color_variance * 0.25
+            sharpness * 0.28
+            + color_variance * 0.32
             + texture_score * 0.25
             + (1.0 - screen_glare) * 0.15
         )
         score = round(float(np.clip(score, 0.0, 1.0)), 3)
 
+        strong_spoof_count = sum(
+            [
+                sharpness < 0.15,
+                screen_glare > 0.70,
+                texture_score < 0.10,
+                color_variance < 0.15,
+            ]
+        )
+
+        # Live webcam: pass on moderate score OR when fewer than 2 strong spoof cues
+        passed = score >= LIVENESS_PASS_THRESHOLD or (
+            score >= 0.30 and strong_spoof_count <= 1
+        )
+
         reason = "Live capture indicators within normal range"
-        if score < LIVENESS_PASS_THRESHOLD:
+        if not passed:
             reasons = []
-            if sharpness < 0.35:
+            if sharpness < 0.22:
                 reasons.append("low sharpness (blur/print)")
-            if screen_glare > 0.45:
+            if screen_glare > 0.55:
                 reasons.append("screen glare detected")
-            if texture_score < 0.25:
+            if texture_score < 0.18:
                 reasons.append("flat texture (photo-of-photo)")
-            if color_variance < 0.25:
+            if color_variance < 0.18:
                 reasons.append("low color depth")
             reason = "; ".join(reasons) if reasons else "Spoof indicators above threshold"
 
@@ -101,6 +136,8 @@ class LivenessDetector:
             "texture_score": round(texture_score, 3),
             "screen_glare": round(screen_glare, 3),
             "score": score,
+            "strong_spoof_count": strong_spoof_count,
+            "passed": passed,
             "reason": reason,
         }
 
@@ -141,10 +178,19 @@ class LivenessDetector:
             return neural
 
         signals = self._analyze_signals(selfie_path)
-        passed = signals["score"] >= LIVENESS_PASS_THRESHOLD
+        passed = signals["passed"]
         note = None
         if not self.weights_path.exists():
             note = "Place MiniFASNetV2.pth in backend/models/antispoof/ for neural anti-spoofing"
+
+        logger.info(
+            "Liveness heuristic: score=%.3f passed=%s sharp=%.3f glare=%.3f texture=%.3f",
+            signals["score"],
+            passed,
+            signals["sharpness"],
+            signals["screen_glare"],
+            signals["texture_score"],
+        )
 
         return {
             "liveness_passed": passed,
@@ -156,6 +202,7 @@ class LivenessDetector:
                 "color_variance": signals["color_variance"],
                 "texture_score": signals["texture_score"],
                 "screen_glare": signals["screen_glare"],
+                "strong_spoof_count": signals["strong_spoof_count"],
             },
             "note": note,
             "inference_ms": round((time.perf_counter() - start) * 1000, 1),

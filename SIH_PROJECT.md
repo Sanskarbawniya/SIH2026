@@ -2,13 +2,13 @@
 
 > **This is the permanent first document for the SIH2026 repository.**  
 > All design decisions, phase plans, tech stack choices, and system architecture live here.  
-
+> Original problem statement reference: [`SIH_PS26188.md`](./SIH_PS26188.md)
 
 | Field | Value |
 | --- | --- |
 | **Project Title** | AI-Based Fake Identity & Document Screening System |
 | **Problem Statement ID** | PS-26188 |
-| **Document Version** | 1.0.1 |
+| **Document Version** | 1.1.0 |
 | **Last Updated** | September 2026 |
 | **Target Environment** | Border checkpoints, transit security hubs, automated eKYC portals |
 | **Repository** | `SIH2026/` monorepo (FastAPI backend + React frontend) |
@@ -19,10 +19,10 @@
 
 This system screens identity documents and live faces at high-throughput checkpoints. It combines **OCR extraction**, **mathematical document validation**, **forensic tampering detection (ELA)**, **facial biometrics**, **liveness anti-spoofing**, and **identity graph fraud detection** into a single **0–100 composite risk score** displayed on a React dashboard.
 
-The prototype is built **incrementally in 9 phases (0–8)**. Each phase adds one capability and a demo-able milestone. The core stack is **fully local and open-source** — no paid API keys are required for the SIH demo.
+The prototype is built **incrementally in 8 phases (0–7)**. Each phase adds one capability and a demo-able milestone. The core stack is **fully local and open-source** — no paid API keys are required for the SIH demo.
 
 **Minimum viable SIH prototype:** Phase 5 (unified risk engine).  
-**Strong differentiators:** Phase 6 (fraud loop graph) + Phase 7 (liveness) + Phase 8 (async queue).
+**Strong differentiators:** Phase 6 (fraud loop graph) + Phase 7 (liveness + full pipeline).
 
 ---
 
@@ -47,7 +47,7 @@ Border and transit authorities need automated screening that detects:
 | Liveness | MiniFASNetV2 (or heuristic fallback) on selfie |
 | Multi-identity fraud | NetworkX identity graph with embedding similarity |
 | Operator UX | Dark dashboard, side-by-side ELA view, 0–100 risk gauge |
-| Throughput | Celery + Redis async queue (Phase 8) |
+| Performance | In-memory `ScanCache` — skips re-OCR/ELA on same document |
 
 ---
 
@@ -65,12 +65,9 @@ Border and transit authorities need automated screening that detects:
                   │  /api/upload  ·  /api/scan/*  ·  /api/graph │
                   └────────────────────┬────────────────────┘
                                        │
-                    ┌──────────────────┼──────────────────┐
-                    │ Sync Path        │ Async Path (Ph.8) │
-                    ▼                  ▼                   │
-           ScanOrchestrator      Redis + Celery Worker      │
-                    │                  │                   │
-                    └──────────────────┼──────────────────┘
+                                       ▼
+                              ScanOrchestrator
+                         (with ScanCache layer)
                                        │
            ┌───────────────────────────┼───────────────────────────┐
            ▼                           ▼                           ▼
@@ -110,14 +107,14 @@ Border and transit authorities need automated screening that detects:
 | Layer | Component | Responsibility |
 | --- | --- | --- |
 | **Presentation** | React Dashboard (`frontend/`) | Upload, webcam capture, ELA viewer, risk gauge, fraud alerts |
-| **API Gateway** | FastAPI (`backend/app/main.py`) | REST endpoints, CORS, static file serving for uploads/ELA |
-| **Orchestration** | `ScanOrchestrator` | Chains modules in order; reports progress for async jobs |
+| **API Gateway** | FastAPI (`backend/app/main.py`) | REST endpoints, CORS, model warmup, static `/uploads` |
+| **Orchestration** | `ScanOrchestrator` | Chains modules in order by phase mode |
+| **Performance Cache** | `ScanCache` | In-memory cache for OCR, ELA pipeline, and face crops |
 | **ML / CV Services** | `services/ocr.py`, `forensics.py`, `biometrics.py`, `liveness.py` | Inference and scoring per module |
 | **Rules** | `services/validation.py` | Deterministic PAN / Aadhaar / MRZ checks |
-| **Fraud Graph** | `services/graph.py` | In-memory NetworkX graph; cosine similarity on face embeddings |
+| **Fraud Graph** | `services/graph.py` | In-memory NetworkX graph; cosine similarity + identity keys |
 | **Scoring** | `services/risk_engine.py` | Weighted penalty aggregation → 0–100 score |
-| **Async (Phase 8)** | Celery + Redis | Non-blocking scan jobs with polling |
-| **Persistence** | `uploads/` directory | Document images, ELA heatmaps, face crops |
+| **Persistence** | `uploads/` directory | Documents, preprocessed images, ELA heatmaps, face crops |
 
 ### 3.3 Deployment Topology
 
@@ -127,25 +124,24 @@ Border and transit authorities need automated screening that detects:
 │ localhost:5173│     │  Vite (dev)  │     │  localhost:8000  │
 └──────────────┘     └──────────────┘     └────────┬─────────┘
                                                      │
-                              ┌───────────────────────┼───────────────────────┐
-                              ▼                       ▼                       ▼
-                       ┌────────────┐          ┌────────────┐          ┌────────────┐
-                       │   Redis 7  │◀────────▶│   Celery   │          │  uploads/  │
-                       │  (broker)  │          │   Worker   │          │  (volume)  │
-                       └────────────┘          └────────────┘          └────────────┘
+                                                     ▼
+                                              ┌────────────┐
+                                              │  uploads/  │
+                                              │ (local FS) │
+                                              └────────────┘
 ```
 
-Docker Compose (`docker-compose.yml`) runs Redis, backend, and Celery worker together for Phase 8.
+At startup, the backend **pre-warms** docTR (OCR) and DeepFace (ArcFace) models to reduce first-scan latency. Optional `backend/Dockerfile` supports single-container deployment.
 
 ---
 
 ## 4. Data Flow & Pipeline Stages
 
-### 4.1 Full Scan Pipeline (Phase 6–8 Complete Mode)
+### 4.1 Full Scan Pipeline (Phase 7 — Complete Mode)
 
 ```
-Document Image ──▶ [1. OCR] ──▶ extracted fields (PAN, Aadhaar, passport, name, DOB)
-                        │
+Document Image ──▶ [1. OCR] ──▶ extracted fields (+ preprocessed image saved)
+                        │         (ScanCache hit → skip OCR + ELA if same file)
                         ▼
                    [2. Validate] ──▶ P_mrz (format + Verhoeff + MRZ)
                         │
@@ -167,7 +163,9 @@ Selfie Image ──▶ [4. Liveness] ──▶ pass/fail (spoof → P_face = 1.0
                    ScanResult JSON ──▶ React Dashboard
 ```
 
-### 4.2 Progress Steps (Async UI)
+### 4.2 Dashboard Progress Steps (UI Simulation)
+
+The dashboard animates progress while waiting for the synchronous API response:
 
 | Progress | Step | Module |
 | --- | --- | --- |
@@ -208,15 +206,15 @@ Selfie Image ──▶ [4. Liveness] ──▶ pass/fail (spoof → P_face = 1.0
 | **Liveness** | MiniFASNetV2 | Silent-Face weights | Presentation attack detection |
 | | OpenCV heuristic | — | Fallback when weights absent |
 | **Graph** | NetworkX | `>=3.2.1` | In-memory identity fraud graph |
-| **Async** | Celery | `>=5.3.6` | Distributed scan workers |
-| | Redis | `7-alpine` (Docker) | Broker + result backend |
+| **Caching** | ScanCache (custom) | — | In-memory OCR / ELA / face-crop cache |
 | **Optional** | PostgreSQL + pgvector | 16 | Persistent graph (not required for demo) |
+| **Optional (future)** | Celery + Redis | — | Async job queue for high throughput |
 
 ### 5.2 Open-Source Base Repositories
 
 | Module | Base Repository | Our Extension |
 | --- | --- | --- |
-| Pipeline scaffold | [AegisKYC](https://github.com/ishansurdi/AegisKYC) | Redis/Celery, ELA viewer, graph alerts |
+| Pipeline scaffold | [AegisKYC](https://github.com/ishansurdi/AegisKYC) | ELA viewer, graph alerts, ScanCache |
 | Forensics | [DocForensics](https://github.com/Suryakarthik-1/DocForensics) | Automated numeric P_ela scoring |
 | OCR | [Mindee docTR](https://github.com/mindee/doctr) | Indian ID regex field mapping |
 | Face verify | [DeepFace](https://github.com/serengil/deepface) | Embedding → graph integration |
@@ -224,9 +222,9 @@ Selfie Image ──▶ [4. Liveness] ──▶ pass/fail (spoof → P_face = 1.0
 
 ---
 
-## 6. Phase-by-Phase Build Plan (0 → 8)
+## 6. Phase-by-Phase Build Plan (0 → 7)
 
-> **Build philosophy:** Sync first, async later. One document type first (PAN). In-memory graph before PostgreSQL. Demo after every phase.
+> **Build philosophy:** One document type first (PAN). In-memory graph before PostgreSQL. Demo after every phase. Cache expensive ML steps when the same document is re-scanned.
 
 ### Phase Overview
 
@@ -238,9 +236,8 @@ Selfie Image ──▶ [4. Liveness] ──▶ pass/fail (spoof → P_face = 1.0
 | **3** | ELA Forensics | Side-by-side ELA heatmap | PIL ELA, patch variance | ✅ Done |
 | **4** | Face Match | ID photo vs selfie match | DeepFace ArcFace | ✅ Done |
 | **5** | Unified Risk Engine | Full pipeline → 0–100 score | RiskEngine, ScanOrchestrator | ✅ Done |
-| **6** | Identity Graph Fraud | Same face, two docs → alert | NetworkX, cosine similarity | ✅ Done |
-| **7** | Liveness / Anti-Spoofing | Photo-of-photo fails | MiniFASNetV2 + heuristic | ✅ Done |
-| **8** | Async Queue + Polish | Non-blocking scan + progress UI | Celery, Redis, Docker | ✅ Done |
+| **6** | Identity Graph Fraud | Same face, two docs → alert | NetworkX, cosine similarity, identity keys | ✅ Done |
+| **7** | Liveness + Full Pipeline | Liveness → face → graph in one scan | MiniFASNetV2 + heuristic, ScanCache | ✅ Done |
 
 ---
 
@@ -267,7 +264,7 @@ Selfie Image ──▶ [4. Liveness] ──▶ pass/fail (spoof → P_face = 1.0
 | Category | Technology |
 | --- | --- |
 | OCR engine | Mindee docTR (DBResNet50 + CRNN VGG16) |
-| Preprocessing | OpenCV CLAHE illumination correction |
+| Preprocessing | OpenCV CLAHE → saved to `uploads/preprocessed/` |
 | Field parsing | Regex for PAN, Aadhaar, passport, name, DOB |
 
 **Service:** `backend/app/services/ocr.py` → `DocumentOCRProcessor`  
@@ -358,7 +355,9 @@ Selfie Image ──▶ [4. Liveness] ──▶ pass/fail (spoof → P_face = 1.0
 | Graph engine | NetworkX in-memory graph |
 | Similarity | Cosine on 512-D ArcFace embeddings |
 | Detection | Face node linked to ≥2 document nodes |
-| Status types | clear, duplicate_rescan, same_identity, linked_profile, fraud_loop |
+| Identity keys | PAN / Aadhaar / passport extracted from OCR |
+| Content fingerprint | SHA-256 over document + selfie bytes (duplicate rescan detection) |
+| Status types | `clear`, `duplicate_rescan`, `same_identity`, `linked_profile`, `fraud_loop` |
 
 **Service:** `backend/app/services/graph.py` → `IdentityGraphEngine`  
 **Endpoints:** `POST /api/scan/graph`, `GET /api/graph/alerts`, `GET /api/graph/stats`, `DELETE /api/graph/reset`  
@@ -368,41 +367,38 @@ Selfie Image ──▶ [4. Liveness] ──▶ pass/fail (spoof → P_face = 1.0
 
 ---
 
-### Phase 7 — Liveness / Anti-Spoofing
+### Phase 7 — Liveness + Full Pipeline ★ Production Demo Mode
 
-**Goal:** Reject screen/print photo attacks before face verification.
+**Goal:** Full end-to-end scan with liveness gate, face verification, and identity graph — the complete SIH demo path.
 
 | Category | Technology |
 | --- | --- |
-| Primary | MiniFASNetV2 (Silent-Face `.pth` weights) |
-| Fallback | Multi-signal OpenCV heuristic (sharpness, texture, screen glare) |
-| Weights path | `backend/models/antispoof/MiniFASNetV2.pth` |
+| Liveness (primary) | MiniFASNetV2 (Silent-Face `.pth` weights) |
+| Liveness (fallback) | Multi-signal OpenCV heuristic (sharpness, texture, screen glare) |
+| Face + graph | ArcFace verify + embedding → NetworkX fraud loop |
+| Performance | `ScanCache` skips re-OCR/ELA on identical document bytes |
 | On spoof fail | `P_face = 1.0`, skip DeepFace verify |
 
-**Service:** `backend/app/services/liveness.py` → `LivenessDetector`  
+**Services:** `liveness.py`, `orchestrator.py` (`run_liveness_scan`)  
 **Endpoint:** `POST /api/scan/liveness`  
-**Frontend:** `LivenessCard.tsx`
+**Frontend:** `LivenessCard.tsx`, `GraphFraudPanel.tsx`, `UnifiedScanPanel.tsx`
 
-**Deliverable:** Photo on phone screen → liveness FAIL; live face → PASS → face verify proceeds.
+**Deliverable:** Photo on phone → liveness FAIL; live face → face match + graph evaluation + unified risk score.
 
 ---
 
-### Phase 8 — Async Queue + Production Polish
+### Cross-Cutting: ScanCache (Performance Layer)
 
-**Goal:** Non-blocking uploads, job polling, polished dashboard.
+**Goal:** Avoid re-running expensive OCR and ELA when the same document is scanned across multiple phase endpoints.
 
-| Category | Technology |
-| --- | --- |
-| Message broker | Redis 7 (Docker) |
-| Task queue | Celery worker |
-| Job polling | `GET /api/scan/{job_id}/status` |
-| Containerization | `docker-compose.yml` (redis, backend, celery-worker) |
+| Cache Key | Cached Data | Used By |
+| --- | --- | --- |
+| SHA-256 file fingerprint | Full document pipeline (OCR, validation, ELA) | `orchestrator.py` |
+| Same fingerprint | OCR extracted fields | `ocr.py` |
+| Same fingerprint | Face crop path | `biometrics.py` |
 
-**Task:** `backend/app/tasks/scan_task.py`  
-**Endpoint:** `POST /api/scan/full?async=true` → `{ job_id }`  
-**Frontend:** Progress bar, async mode checkbox
-
-**Deliverable:** Submit scan → job queued → poll progress → final dashboard.
+**Service:** `backend/app/services/scan_cache.py`  
+**Cleared by:** `DELETE /api/graph/reset` (along with identity graph)
 
 ---
 
@@ -416,8 +412,7 @@ Phase 0 (Skeleton)
                             └── Phase 4 (Face)
                                     └── Phase 5 (Risk Engine) ★ MVP
                                             ├── Phase 6 (Graph)
-                                            ├── Phase 7 (Liveness)
-                                            └── Phase 8 (Async)
+                                            └── Phase 7 (Liveness + Full Pipeline) ★ Demo
 ```
 
 ---
@@ -431,7 +426,8 @@ Phase 0 (Skeleton)
 | 3 | Forensics | `services/forensics.py` | Document image | ELA URL, anomaly score, `P_ela` |
 | 4 | Biometrics | `services/biometrics.py` | ID crop + selfie | verified, distance, embedding |
 | 4b | Liveness | `services/liveness.py` | Selfie image | liveness_passed, score, method |
-| 5 | Identity Graph | `services/graph.py` | embedding + doc ID | fraud_loop_detected, `P_graph` |
+| 5 | Identity Graph | `services/graph.py` | embedding + doc ID + identity keys | fraud_loop_detected, `graph_status`, `P_graph` |
+| — | Scan Cache | `services/scan_cache.py` | document file bytes | cached OCR / ELA / face crop |
 | — | Orchestrator | `services/orchestrator.py` | Files + phase mode | Complete `ScanResult` |
 | — | Risk Engine | `services/risk_engine.py` | All penalties | score, band, breakdown |
 
@@ -482,14 +478,12 @@ All routes prefixed with `/api`.
 | `/scan/face` | POST | 4 | Full doc pipeline + face match |
 | `/scan/full` | POST | 5 | Unified end-to-end risk score |
 | `/scan/graph` | POST | 6 | Full pipeline + fraud graph |
-| `/scan/liveness` | POST | 7 | Liveness + face match |
-| `/scan/full?async=true` | POST | 8 | Queue async job → `{ job_id }` |
-| `/scan/{job_id}/status` | GET | 8 | Poll job progress + result |
+| `/scan/liveness` | POST | 7 | Liveness + face match + identity graph |
 | `/graph/alerts` | GET | 6 | Active fraud loop alerts |
 | `/graph/stats` | GET | 6 | Graph node/edge statistics |
-| `/graph/reset` | DELETE | 6 | Clear in-memory graph |
+| `/graph/reset` | DELETE | 6 | Clear in-memory graph + ScanCache |
 
-**Static files:** `/uploads/` serves document images, ELA heatmaps, and face crops.
+**Static files:** `/uploads/` serves documents, preprocessed images, ELA heatmaps, and face crops.
 
 ---
 
@@ -509,7 +503,8 @@ Every module writes to this schema (`backend/app/schemas/scan_result.py`). The f
     "aadhaar_number": null,
     "passport_number": null,
     "name": "JOHN DOE",
-    "dob": "01/01/1990"
+    "dob": "01/01/1990",
+    "preprocessed_url": "/uploads/preprocessed/doc_abc_pre.jpg"
   },
   "validations": {
     "pan_format": true,
@@ -569,41 +564,37 @@ SIH2026/                                    # Monorepo root
 ├── README.md                               # Quick-start entry point → links here
 ├── .env.example                            # Environment variable template
 ├── .gitignore                              # Excludes uploads/, venv/, node_modules/, .env
-├── docker-compose.yml                      # Redis + backend + Celery worker (Phase 8)
 │
 ├── backend/                                # Python FastAPI service
-│   ├── Dockerfile                          # Container image for backend & Celery
+│   ├── Dockerfile                          # Optional single-container deployment
 │   ├── requirements.txt                    # Python deps (incremental by phase)
 │   │
 │   ├── app/                                # Application package
 │   │   ├── __init__.py
-│   │   ├── main.py                         # FastAPI entry, CORS, OCR warmup, static /uploads
-│   │   ├── config.py                       # UPLOAD_DIR, CORS_ORIGINS, Redis URLs
+│   │   ├── main.py                         # FastAPI entry, OCR + ArcFace warmup, static /uploads
+│   │   ├── config.py                       # UPLOAD_DIR, CORS_ORIGINS, upload subdirs
 │   │   │
 │   │   ├── routes/                         # HTTP route handlers
 │   │   │   ├── __init__.py                 # api_router assembly (/api prefix)
 │   │   │   ├── health.py                   # GET  /api/health
 │   │   │   ├── upload.py                   # POST /api/upload
-│   │   │   └── scan.py                     # POST /api/scan/*, GET status, graph endpoints
+│   │   │   └── scan.py                     # POST /api/scan/*, graph endpoints
 │   │   │
 │   │   ├── services/                       # Core ML / CV / rules pipeline
 │   │   │   ├── __init__.py
-│   │   │   ├── ocr.py                      # Module 1 — docTR OCR + field extraction
+│   │   │   ├── ocr.py                      # Module 1 — docTR OCR + CLAHE preprocessing
 │   │   │   ├── validation.py               # Module 2 — PAN / Verhoeff / MRZ rules
 │   │   │   ├── forensics.py                # Module 3 — ELA tampering analysis
 │   │   │   ├── biometrics.py               # Module 4 — DeepFace ArcFace verify + embed
 │   │   │   ├── liveness.py                 # Module 4b — MiniFASNet + heuristic anti-spoof
 │   │   │   ├── graph.py                    # Module 5 — NetworkX identity fraud graph
+│   │   │   ├── scan_cache.py               # In-memory OCR / ELA / face-crop cache
 │   │   │   ├── risk_engine.py              # Weighted 0–100 composite risk score
 │   │   │   └── orchestrator.py             # ScanOrchestrator — chains all modules by phase
 │   │   │
-│   │   ├── schemas/                        # Pydantic request/response models
-│   │   │   ├── __init__.py
-│   │   │   └── scan_result.py              # ScanResult, Penalties, RiskResult, etc.
-│   │   │
-│   │   └── tasks/                          # Async job workers (Phase 8)
+│   │   └── schemas/                        # Pydantic request/response models
 │   │       ├── __init__.py
-│   │       └── scan_task.py                # Celery app + run_scan_task
+│   │       └── scan_result.py              # ScanResult, Penalties, RiskResult, etc.
 │   │
 │   ├── models/                             # ML model weights (not in git if large)
 │   │   └── antispoof/
@@ -613,6 +604,7 @@ SIH2026/                                    # Monorepo root
 │   └── uploads/                            # ⚠ Runtime storage — gitignored
 │       ├── doc_*.jpg                       # Uploaded identity documents
 │       ├── selfie_*.jpg                    # Webcam selfie captures
+│       ├── preprocessed/                   # CLAHE-corrected images for OCR
 │       ├── ela/                            # Generated ELA heatmap PNGs
 │       │   └── {scan_id}_ela.png
 │       └── faces/                          # Cropped ID photo regions
@@ -683,12 +675,12 @@ SIH2026/                                    # Monorepo root
 | API entry & middleware | `backend/app/main.py` |
 | All scan endpoints | `backend/app/routes/scan.py` |
 | Pipeline orchestration | `backend/app/services/orchestrator.py` |
+| Performance cache | `backend/app/services/scan_cache.py` |
 | Shared response schema | `backend/app/schemas/scan_result.py` |
-| Async job queue | `backend/app/tasks/scan_task.py` |
 | Frontend API calls | `frontend/src/api.ts` |
 | Operator dashboard | `frontend/src/pages/Dashboard.tsx` |
 | Environment config | `.env.example` → copy to `.env` |
-| Container orchestration | `docker-compose.yml` |
+| Optional container | `backend/Dockerfile` |
 | Python dependencies | `backend/requirements.txt` |
 | Frontend dependencies | `frontend/package.json` |
 
@@ -703,8 +695,7 @@ SIH2026/                                    # Monorepo root
 | **4** | `services/biometrics.py`, `uploads/faces/` | `FaceMatchCard.tsx`, `WebcamCapture` in `UploadPanel.tsx` |
 | **5** | `services/risk_engine.py`, `services/orchestrator.py` | `RiskGauge.tsx`, `UnifiedScanPanel.tsx` |
 | **6** | `services/graph.py` | `GraphFraudPanel.tsx` |
-| **7** | `services/liveness.py`, `models/antispoof/` | `LivenessCard.tsx` |
-| **8** | `tasks/scan_task.py`, `Dockerfile`, `docker-compose.yml` | Async progress UI in `Dashboard.tsx` |
+| **7** | `services/liveness.py`, `services/scan_cache.py`, `models/antispoof/` | `LivenessCard.tsx`, full pipeline in `Dashboard.tsx` |
 
 ---
 
@@ -717,7 +708,6 @@ SIH2026/                                    # Monorepo root
 | Python | 3.11+ |
 | Node.js | 18+ LTS |
 | Git | Latest |
-| Docker Desktop | Latest (Phase 8 only) |
 | Webcam | 720p+ (Phase 4+) |
 
 **Hardware:** 8 GB RAM minimum, 16 GB+ recommended. GPU optional but speeds OCR/face 3–10×.
@@ -742,30 +732,17 @@ npm run dev
 
 Open **http://localhost:5173**
 
-### Phase 8 — Async Queue
-
-```bash
-docker compose up redis -d
-cd backend
-celery -A app.tasks.scan_task.celery_app worker --loglevel=info
-```
-
-Enable **Async queue** in the dashboard UI.
-
 ### Environment Variables (`.env`)
 
 ```env
 UPLOAD_DIR=./uploads
 CORS_ORIGINS=http://localhost:5173
-REDIS_URL=redis://localhost:6379/0
-CELERY_BROKER_URL=redis://localhost:6379/0
-CELERY_RESULT_BACKEND=redis://localhost:6379/0
-# DATABASE_URL=postgresql://...   # optional Phase 6 persistence
+# DATABASE_URL=postgresql://...   # optional persistence
 ```
 
 ### API Keys
 
-**None required** for Phases 0–8. The core prototype is fully local. Optional cloud fallbacks (Mindee Cloud, AWS Rekognition, Azure Face) are documented in [`SIH_PS26188.md`](./SIH_PS26188.md) Section 7.2.
+**None required** for Phases 0–7. The core prototype is fully local. Optional cloud fallbacks (Mindee Cloud, AWS Rekognition, Azure Face) are documented in [`SIH_PS26188.md`](./SIH_PS26188.md) Section 7.2.
 
 ---
 
@@ -781,7 +758,7 @@ Run these 5 scenarios live:
 | 4 | **Face mismatch** | Wrong person's selfie | `P_face` high, `verified: false` |
 | 5 | **Fraud loop** | Same person, second document | Graph alert, `P_graph` penalty |
 
-**Liveness demo (Phase 7):** Show photo on phone → FAIL; live face → PASS.
+**Liveness demo (Phase 7):** Use `POST /api/scan/liveness` — photo on phone → FAIL; live face → full pipeline with graph alert on repeat fraud.
 
 **Test data rule:** Use **synthetic/mock documents only**. Never use real PAN/Aadhaar images.
 
@@ -792,14 +769,13 @@ Run these 5 scenarios live:
 | Phase | Feature | Backend | Frontend | Notes |
 | --- | --- | --- | --- | --- |
 | 0 | Upload & health | ✅ | ✅ | |
-| 1 | OCR extraction | ✅ | ✅ | docTR singleton at startup |
+| 1 | OCR extraction | ✅ | ✅ | docTR + ArcFace warmup at startup |
 | 2 | Validation rules | ✅ | ✅ | PAN, Verhoeff, MRZ |
 | 3 | ELA forensics | ✅ | ✅ | Side-by-side viewer |
 | 4 | Face match | ✅ | ✅ | Webcam capture |
 | 5 | Risk engine | ✅ | ✅ | Recharts gauge |
-| 6 | Identity graph | ✅ | ✅ | In-memory NetworkX |
-| 7 | Liveness | ✅ | ✅ | Heuristic + MiniFASNet slot |
-| 8 | Async queue | ✅ | ✅ | Celery + Redis + Docker |
+| 6 | Identity graph | ✅ | ✅ | In-memory NetworkX + identity keys |
+| 7 | Liveness + full pipeline | ✅ | ✅ | Heuristic + MiniFASNet slot, ScanCache |
 
 ---
 
@@ -809,7 +785,8 @@ Run these 5 scenarios live:
 
 | Principle | Rationale |
 | --- | --- |
-| Sync first, async later | Debug ML pipeline before adding Celery complexity |
+| Sync pipeline first | All scans are synchronous REST — simpler to debug and demo |
+| Cache expensive steps | ScanCache avoids re-OCR/ELA when testing multiple phases on same doc |
 | One document type first | PAN before passport MRZ |
 | In-memory graph first | NetworkX before PostgreSQL/pgvector |
 | Demo after every phase | Never go 2+ days without visible progress |
@@ -836,7 +813,8 @@ Run these 5 scenarios live:
 | GPU inference | CUDA PyTorch | When CPU latency > 15 s per scan |
 | Cloud OCR fallback | Mindee API / Google Vision | When docTR fails on low-quality scans |
 | Cloud face fallback | AWS Rekognition / Azure Face | Enterprise integration |
-| Multi-worker production | Gunicorn + multiple Celery workers | High-throughput checkpoints |
+| Async job queue | Celery + Redis + Docker Compose | High-throughput / non-blocking scans |
+| Multi-worker production | Gunicorn + multiple workers | Production deployment |
 | EasyOCR fallback | EasyOCR | Regional Indian script edge cases |
 | HTTPS deployment | Reverse proxy (nginx) | Non-localhost webcam access |
 
@@ -848,6 +826,7 @@ Run these 5 scenarios live:
 | --- | --- | --- |
 | 1.0.0 | Sep 2026 | Initial master architecture document synthesized from PS-26188 spec and implemented codebase |
 | 1.0.1 | Sep 2026 | Added complete directory structure tree, legend, and phase-to-file mapping |
+| 1.1.0 | Sep 2026 | Synced with current codebase: Phase 8 removed, ScanCache added, Phase 7 = full pipeline, model warmup, preprocessed uploads |
 
 ---
 
